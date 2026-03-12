@@ -588,8 +588,8 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
     private void encodeJwt()
     {
         try {
-            String header = headerArea.getText().trim();
-            String payload = payloadArea.getText().trim();
+            String header = compressJson(headerArea.getText());
+            String payload = compressJson(payloadArea.getText());
             String secret = secretField.getText().trim();
             String algorithm = (String) algorithmCombo.getSelectedItem();
             
@@ -612,6 +612,17 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
         } catch (Exception e) {
             resultArea.setText("编码失败: " + e.getMessage());
         }
+    }
+    
+    private String compressJson(String json)
+    {
+        StringBuilder sb = new StringBuilder();
+        for (char c : json.toCharArray()) {
+            if (c != ' ' && c != '\n' && c != '\r' && c != '\t') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
     
     private void verifySignature()
