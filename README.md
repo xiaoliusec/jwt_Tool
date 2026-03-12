@@ -3,7 +3,7 @@
 Burp Suite 扩展插件，用于 JWT 令牌的解析、编码、验证和爆破攻击。
 
 ## 工具截图
-<img width="3600" height="2114" alt="image" src="https://github.com/user-attachments/assets/2c8d8176-bedd-4abb-a7b9-545048d15835" />
+<img width="3600" height="2114" alt="image" src="https://github.com/user-attachments/assets/7e6cd37a-1994-471d-9a82-10c09ce51a41" />
 
 
 
