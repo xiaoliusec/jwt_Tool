@@ -5,6 +5,7 @@ import javax.swing.border.EmptyBorder;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -13,6 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
 {
@@ -514,8 +516,13 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
             originalHeaderBase64 = parts[0];
             originalPayloadBase64 = parts[1];
             
-            headerArea.setText(formatJson(decodeBase64Url(parts[0])));
-            payloadArea.setText(formatJson(decodeBase64Url(parts[1])));
+            String headerJson = decodeBase64Url(parts[0]);
+            headerArea.setText(formatJson(headerJson));
+            
+            byte[] payloadBytes = decodeBase64UrlBytes(parts[1]);
+            String payloadStr = decompressPayload(payloadBytes, headerJson);
+            payloadArea.setText(formatJson(payloadStr));
+            
             verifyField.setText(parts[2]);
             
             Pattern algPattern = Pattern.compile("\"alg\"\\s*:\\s*\"([^\"]+)\"");
@@ -529,6 +536,54 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
         } catch (Exception e) {
             resultArea.setText("解析失败: " + e.getMessage());
         }
+    }
+    
+    private byte[] decodeBase64UrlBytes(String input)
+    {
+        String base64 = input.replace('-', '+').replace('_', '/');
+        switch (base64.length() % 4) {
+            case 2: base64 += "=="; break;
+            case 3: base64 += "="; break;
+        }
+        return Base64.getDecoder().decode(base64);
+    }
+    
+    private String decompressPayload(byte[] payloadBytes, String headerJson)
+    {
+        Pattern zipPattern = Pattern.compile("\"zip\"\\s*:\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE);
+        Matcher zipMatcher = zipPattern.matcher(headerJson);
+        
+        if (zipMatcher.find()) {
+            String zipAlgo = zipMatcher.group(1).toUpperCase();
+            if ("GZIP".equals(zipAlgo)) {
+                try {
+                    GZIPInputStream gis = new GZIPInputStream(
+                        new java.io.ByteArrayInputStream(payloadBytes));
+                    java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                    byte[] buffer = new byte[4096];
+                    int len;
+                    while ((len = gis.read(buffer)) > 0) {
+                        baos.write(buffer, 0, len);
+                    }
+                    gis.close();
+                    return baos.toString(StandardCharsets.UTF_8);
+                } catch (Exception e) {
+                    return "[GZIP解压失败] " + new String(payloadBytes, StandardCharsets.ISO_8859_1);
+                }
+            } else if ("DEF".equals(zipAlgo) || "DEFLATE".equals(zipAlgo)) {
+                try {
+                    java.util.zip.Inflater inf = new java.util.zip.Inflater(true);
+                    inf.setInput(payloadBytes);
+                    byte[] result = new byte[4096];
+                    int len = inf.inflate(result);
+                    inf.end();
+                    return new String(result, 0, len, StandardCharsets.UTF_8);
+                } catch (Exception e) {
+                    return "[DEF解压失败] " + new String(payloadBytes, StandardCharsets.ISO_8859_1);
+                }
+            }
+        }
+        return new String(payloadBytes, StandardCharsets.UTF_8);
     }
     
     private String decodeBase64Url(String input)
@@ -589,17 +644,34 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
     {
         try {
             String header = compressJson(headerArea.getText());
-            String payload = compressJson(payloadArea.getText());
             String secret = secretField.getText().trim();
             String algorithm = (String) algorithmCombo.getSelectedItem();
             
-            if (header.isEmpty() || payload.isEmpty()) {
-                resultArea.setText("Header和Payload不能为空");
+            if (header.isEmpty()) {
+                resultArea.setText("Header不能为空");
                 return;
             }
             
             String headerBase64 = encodeBase64Url(header);
-            String payloadBase64 = encodeBase64Url(payload);
+            
+            String payloadBase64;
+            String payload = compressJson(payloadArea.getText());
+            
+            if (payload.isEmpty()) {
+                resultArea.setText("Payload不能为空");
+                return;
+            }
+            
+            Pattern zipPattern = Pattern.compile("\"zip\"\\s*:\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE);
+            Matcher zipMatcher = zipPattern.matcher(header);
+            
+            if (zipMatcher.find()) {
+                String zipAlgo = zipMatcher.group(1).toUpperCase();
+                byte[] compressed = compressPayload(payload, zipAlgo);
+                payloadBase64 = encodeBase64UrlBytes(compressed);
+            } else {
+                payloadBase64 = encodeBase64Url(payload);
+            }
             
             String signature = "";
             if (!secret.isEmpty() && !"None".equals(algorithm)) {
@@ -665,8 +737,38 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
     
     private String encodeBase64Url(String input)
     {
-        String base64 = Base64.getEncoder().encodeToString(input.getBytes());
+        String base64 = Base64.getEncoder().encodeToString(input.getBytes(StandardCharsets.UTF_8));
         return base64.replace('+', '-').replace('/', '_').replace("=", "");
+    }
+    
+    private String encodeBase64UrlBytes(byte[] input)
+    {
+        String base64 = Base64.getEncoder().encodeToString(input);
+        return base64.replace('+', '-').replace('/', '_').replace("=", "");
+    }
+    
+    private byte[] compressPayload(String payload, String zipAlgo) throws Exception
+    {
+        if ("GZIP".equals(zipAlgo)) {
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(baos);
+            gzip.write(payload.getBytes(StandardCharsets.UTF_8));
+            gzip.close();
+            return baos.toByteArray();
+        } else if ("DEF".equals(zipAlgo) || "DEFLATE".equals(zipAlgo)) {
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            java.util.zip.Deflater deflater = new java.util.zip.Deflater();
+            deflater.setInput(payload.getBytes(StandardCharsets.UTF_8));
+            deflater.finish();
+            byte[] buffer = new byte[4096];
+            while (!deflater.finished()) {
+                int count = deflater.deflate(buffer);
+                baos.write(buffer, 0, count);
+            }
+            deflater.end();
+            return baos.toByteArray();
+        }
+        return payload.getBytes(StandardCharsets.UTF_8);
     }
     
     private String generateSignature(String data, String key, String algorithm)
