@@ -777,14 +777,7 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
         
         try {
             if (algorithm.startsWith("HS")) {
-                String alg = algorithm.replace("HS256", "HmacSHA256")
-                                    .replace("HS384", "HmacSHA384")
-                                    .replace("HS512", "HmacSHA512");
-                javax.crypto.Mac mac = javax.crypto.Mac.getInstance(alg);
-                mac.init(new javax.crypto.spec.SecretKeySpec(key.getBytes(), alg));
-                byte[] hmac = mac.doFinal(data.getBytes());
-                String sig = Base64.getEncoder().encodeToString(hmac);
-                return sig.replace('+', '-').replace('/', '_').replace("=", "");
+                return generateHmacSignature(data, key.getBytes(StandardCharsets.UTF_8), algorithm);
             }
             else if (algorithm.startsWith("RS") || algorithm.startsWith("PS")) {
                 return signWithRSA(data, key, algorithm);
@@ -798,6 +791,38 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
             return "";
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    private String generateHmacSignature(String data, byte[] keyBytes, String algorithm)
+    {
+        try {
+            String alg = algorithm.replace("HS256", "HmacSHA256")
+                                 .replace("HS384", "HmacSHA384")
+                                 .replace("HS512", "HmacSHA512");
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance(alg);
+            mac.init(new javax.crypto.spec.SecretKeySpec(keyBytes, alg));
+            byte[] hmac = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+            String sig = Base64.getEncoder().encodeToString(hmac);
+            return sig.replace('+', '-').replace('/', '_').replace("=", "");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private byte[] decodeBase64Flexible(String value)
+    {
+        String normalized = value.trim().replaceAll("\\s+", "")
+                               .replace('-', '+').replace('_', '/');
+        switch (normalized.length() % 4) {
+            case 2: normalized += "=="; break;
+            case 3: normalized += "="; break;
+            case 1: return null;
+        }
+        try {
+            return Base64.getDecoder().decode(normalized);
+        } catch (IllegalArgumentException e) {
+            return null;
         }
     }
     
@@ -1038,18 +1063,42 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
                     List<String> testWords = getTestWords(enc);
                     for (int i = 0; i < testWords.size() && isRunning.get(); i++) {
                         String secret = testWords.get(i);
-                        String signature = generateSignature(originalHeaderBase64 + "." + originalPayloadBase64, secret, currentAlgorithm);
+                        String data = originalHeaderBase64 + "." + originalPayloadBase64;
+                        String signature;
+                        String displaySecret = secret;
+                        String foundEncoding = enc;
+
+                        if ("Base64".equals(enc)) {
+                            String encodedCandidate = base64(secret);
+                            signature = generateSignature(data, encodedCandidate, currentAlgorithm);
+                            if (!signature.equals(verifySig)) {
+                                byte[] decodedBytes = decodeBase64Flexible(secret);
+                                if (decodedBytes != null) {
+                                    signature = generateHmacSignature(data, decodedBytes, currentAlgorithm);
+                                    if (signature.equals(verifySig)) {
+                                        displaySecret = secret;
+                                        foundEncoding = "Base64(Decode)";
+                                    }
+                                }
+                            } else {
+                                displaySecret = encodedCandidate;
+                                foundEncoding = "Base64(Encode)";
+                            }
+                        } else {
+                            signature = generateSignature(data, secret, currentAlgorithm);
+                        }
                         
                         processedWords++;
                         int progress = (int) (processedWords * 100.0 / totalWords);
                         SwingUtilities.invokeLater(() -> progressBar.setValue(progress));
                         
                         if (signature.equals(verifySig)) {
-                            final String foundEncoding = enc;
+                            final String finalFoundEncoding = foundEncoding;
+                            final String finalDisplaySecret = displaySecret;
                             SwingUtilities.invokeLater(() -> {
-                                secretField.setText(secret);
-                                encodingCombo.setSelectedItem(foundEncoding);
-                                resultArea.setText("[成功] 密钥: " + secret + " (编码: " + foundEncoding + ")");
+                                secretField.setText(finalDisplaySecret);
+                                encodingCombo.setSelectedItem(enc);
+                                resultArea.setText("[成功] 密钥: " + finalDisplaySecret + " (编码: " + finalFoundEncoding + ")");
                             });
                             isRunning.set(false);
                             break;
@@ -1085,7 +1134,7 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
         } else if ("None".equals(encoding)) {
             result.addAll(wordlist);
         } else if ("Base64".equals(encoding)) {
-            for (String word : wordlist) result.add(base64(word));
+            result.addAll(wordlist);
         } else if ("MD5".equals(encoding)) {
             for (String word : wordlist) result.add(md5(word));
         } else if ("MD5_16".equals(encoding)) {
@@ -1096,14 +1145,14 @@ public class JWTTool implements IBurpExtender, ITab, IContextMenuFactory
     
     private String base64(String input)
     {
-        return Base64.getEncoder().encodeToString(input.getBytes());
+        return Base64.getEncoder().encodeToString(input.getBytes(StandardCharsets.UTF_8));
     }
     
     private String md5(String input)
     {
         try {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes());
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
             for (byte b : digest) {
                 String hex = Integer.toHexString(0xff & b);
